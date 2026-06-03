@@ -615,40 +615,61 @@ function findAssistantProseForThread(threadId: string): HTMLElement | null {
   return null;
 }
 
-// Scrapes and dynamically hides SIDETHREAD_ID markers from standard page display
+// Scrapes and dynamically hides SIDETHREAD_ID markers from standard page display, ignoring input areas and sidebars
 function hideThreadIdMarkersInPage() {
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      return node.textContent?.includes('[SIDETHREAD_ID:') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+  const targets = Array.from(document.querySelectorAll('[data-testid^="conversation-turn"], div.markdown.prose, .conversation-turn')) as HTMLElement[];
+  
+  targets.forEach((target) => {
+    if (
+      target.closest('#chatgpt-threads-sidebar-root') || 
+      target.querySelector('#prompt-textarea') || 
+      target.id === 'prompt-textarea'
+    ) {
+      return;
     }
-  });
-  
-  const nodesToWrap: Text[] = [];
-  while (walker.nextNode()) {
-    nodesToWrap.push(walker.currentNode as Text);
-  }
-  
-  nodesToWrap.forEach((textNode) => {
-    const parent = textNode.parentNode;
-    if (!parent || parent.nodeName === 'STYLE' || parent.nodeName === 'SCRIPT') return;
-    if (parent instanceof HTMLElement && parent.classList.contains('sidethread-hidden-marker')) return;
-    
-    const content = textNode.textContent || '';
-    const regex = /\[SIDETHREAD_ID:(thread_[a-zA-Z0-9_-]+)\]/g;
-    
-    if (regex.test(content)) {
-      const newHtml = content.replace(regex, (match) => {
-        return `<span class="sidethread-hidden-marker" style="display:none; font-size:0px; opacity:0; width:0; height:0;">${match}</span>`;
-      });
-      
-      const tempDiv = document.createElement('div');
-      tempDiv.innerHTML = newHtml;
-      
-      while (tempDiv.firstChild) {
-        parent.insertBefore(tempDiv.firstChild, textNode);
+
+    const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const parent = node.parentNode as HTMLElement;
+        if (parent && (
+          parent.nodeName === 'STYLE' || 
+          parent.nodeName === 'SCRIPT' || 
+          parent.id === 'prompt-textarea' ||
+          parent.closest('#prompt-textarea') ||
+          parent.classList.contains('sidethread-hidden-marker')
+        )) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return node.textContent?.includes('[SIDETHREAD_ID:') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
       }
-      parent.removeChild(textNode);
+    });
+    
+    const nodesToWrap: Text[] = [];
+    while (walker.nextNode()) {
+      nodesToWrap.push(walker.currentNode as Text);
     }
+    
+    nodesToWrap.forEach((textNode) => {
+      const parent = textNode.parentNode;
+      if (!parent) return;
+      
+      const content = textNode.textContent || '';
+      const regex = /\[SIDETHREAD_ID:(thread_[a-zA-Z0-9_-]+)\]/g;
+      
+      if (regex.test(content)) {
+        const newHtml = content.replace(regex, (match) => {
+          return `<span class="sidethread-hidden-marker" style="display:none; font-size:0px; opacity:0; width:0; height:0;">${match}</span>`;
+        });
+        
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = newHtml;
+        
+        while (tempDiv.firstChild) {
+          parent.insertBefore(tempDiv.firstChild, textNode);
+        }
+        parent.removeChild(textNode);
+      }
+    });
   });
 }
 
@@ -693,6 +714,16 @@ function startChatObserver() {
               }
               
               store.updateLastMessage(threadId, cleanText);
+
+              // Broadcast streaming token update to other contexts (like Chrome Side Panel)
+              if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+                chrome.runtime.sendMessage({
+                  type: 'STREAMING_UPDATE',
+                  threadId,
+                  content: cleanText,
+                  isWaiting: true
+                }).catch(() => {});
+              }
             }
           }
         }
@@ -701,12 +732,25 @@ function startChatObserver() {
         if (lastStreamingThreadId) {
           const threadId = lastStreamingThreadId;
           const proseEl = findAssistantProseForThread(threadId);
+          let cleanFinal = '';
           if (proseEl) {
             let finalRaw = proseEl.innerText || proseEl.textContent || '';
-            const cleanFinal = finalRaw.replace(/\[SIDETHREAD_ID:(thread_[a-zA-Z0-9_-]+)\]/g, '').trim();
+            cleanFinal = finalRaw.replace(/\[SIDETHREAD_ID:(thread_[a-zA-Z0-9_-]+)\]/g, '').trim();
             store.updateLastMessage(threadId, cleanFinal);
           }
           store.setWaitingForResponse(false, null);
+
+          // Broadcast streaming completed state and trigger threads reload
+          if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({
+              type: 'STREAMING_UPDATE',
+              threadId,
+              content: cleanFinal || lastStreamingText,
+              isWaiting: false
+            }).catch(() => {});
+            chrome.runtime.sendMessage({ type: 'THREADS_MUTATED' }).catch(() => {});
+          }
+
           lastStreamingText = '';
           lastStreamingThreadId = null;
         }
@@ -730,13 +774,29 @@ function startChatObserver() {
   });
 }
 
+// Subscribe to store changes to automatically update layout and styles on settings changes
+useStore.subscribe((state, prevState) => {
+  if (
+    state.settings.sidebarOpen !== prevState.settings.sidebarOpen ||
+    state.settings.sidebarWidth !== prevState.settings.sidebarWidth ||
+    state.settings.layoutMode !== prevState.settings.layoutMode
+  ) {
+    updatePageLayout(state.settings.sidebarOpen, state.settings.sidebarWidth, state.settings.layoutMode);
+    updateSidebarStyle(state.settings.sidebarOpen, state.settings.sidebarWidth, state.settings.layoutMode);
+  }
+});
+
 // Initialize Extension on DOMContentLoaded
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
     initSidebar();
     startChatObserver();
+    // Load initial settings which will automatically trigger the subscription layout updates
+    useStore.getState().loadSettings();
   });
 } else {
   initSidebar();
   startChatObserver();
+  // Load initial settings which will automatically trigger the subscription layout updates
+  useStore.getState().loadSettings();
 }

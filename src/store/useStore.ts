@@ -109,6 +109,11 @@ export const useStore = create<AppState>((set, get) => ({
       }
       // Also fallback to localStorage for redundancy
       localStorage.setItem('sidethead_settings', JSON.stringify(updated));
+
+      // Broadcast update to sync other extension contexts
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ type: 'THREADS_MUTATED' }).catch(() => {});
+      }
     } catch (e) {
       console.error('Failed to save settings:', e);
     }
@@ -231,6 +236,11 @@ export const useStore = create<AppState>((set, get) => ({
         },
       };
     });
+
+    // Broadcast change to synchronize other extension contexts
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      chrome.runtime.sendMessage({ type: 'THREADS_MUTATED' }).catch(() => {});
+    }
   },
 
   updateLastMessage: (threadId, content) => {
@@ -304,8 +314,66 @@ export const useStore = create<AppState>((set, get) => ({
           activeThreadId: state.activeThreadId === threadId ? null : state.activeThreadId,
         };
       });
+
+      // Broadcast update to sync other extension contexts
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ type: 'THREADS_MUTATED' }).catch(() => {});
+      }
     } catch (e) {
       console.error('Failed to delete thread:', e);
     }
   },
 }));
+
+// Listen for cross-context synchronization messages (e.g. from Content Script to Side Panel)
+if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+  chrome.runtime.onMessage.addListener((message) => {
+    const store = useStore.getState();
+    
+    if (message.type === 'STREAMING_UPDATE') {
+      const { threadId, content, isWaiting } = message;
+      
+      // Update waiting state
+      store.setWaitingForResponse(isWaiting, isWaiting ? threadId : null);
+      
+      // Update message text
+      const currentMsgs = [...(store.threadMessages[threadId] || [])];
+      const lastMsg = currentMsgs[currentMsgs.length - 1];
+      
+      if (lastMsg && lastMsg.role === 'assistant') {
+        currentMsgs[currentMsgs.length - 1] = {
+          ...lastMsg,
+          content,
+          timestamp: Date.now(),
+        };
+        useStore.setState({
+          threadMessages: {
+            ...store.threadMessages,
+            [threadId]: currentMsgs,
+          }
+        });
+      } else {
+        const newMessage: ThreadMessage = {
+          id: `msg_sync_${Date.now()}`,
+          threadId,
+          role: 'assistant',
+          content,
+          timestamp: Date.now(),
+        };
+        useStore.setState({
+          threadMessages: {
+            ...store.threadMessages,
+            [threadId]: [...currentMsgs, newMessage],
+          }
+        });
+      }
+    } else if (message.type === 'THREADS_MUTATED') {
+      // Reload threads and settings
+      store.loadThreads();
+      store.loadSettings();
+      if (store.activeThreadId) {
+        store.loadMessages(store.activeThreadId);
+      }
+    }
+  });
+}
