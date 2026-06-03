@@ -692,7 +692,7 @@ function startChatObserver() {
         || document.querySelector('.result-streaming-indicator')
         || document.querySelector('.result-streaming div.markdown.prose')
         || document.querySelector('div.markdown.prose.result-streaming');
-        
+         
       if (streamingEl) {
         const proseEl = streamingEl.closest('.markdown.prose') as HTMLElement 
           || streamingEl.querySelector('.markdown.prose') as HTMLElement
@@ -706,6 +706,7 @@ function startChatObserver() {
             const cleanText = rawText.replace(/\[SIDETHREAD_ID:(thread_[a-zA-Z0-9_-]+)\]/g, '').trim();
             
             if (cleanText && cleanText !== lastStreamingText) {
+              console.log(`SideThread Observer: Streaming update for thread ${threadId} (len: ${cleanText.length})`);
               lastStreamingText = cleanText;
               lastStreamingThreadId = threadId;
               
@@ -731,6 +732,7 @@ function startChatObserver() {
         // Done streaming - check final state
         if (lastStreamingThreadId) {
           const threadId = lastStreamingThreadId;
+          console.log(`SideThread Observer: Streaming completed for thread ${threadId}`);
           const proseEl = findAssistantProseForThread(threadId);
           let cleanFinal = '';
           if (proseEl) {
@@ -742,6 +744,7 @@ function startChatObserver() {
 
           // Broadcast streaming completed state and trigger threads reload
           if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+            console.log('SideThread Observer: Broadcasting final state update and THREADS_MUTATED');
             chrome.runtime.sendMessage({
               type: 'STREAMING_UPDATE',
               threadId,

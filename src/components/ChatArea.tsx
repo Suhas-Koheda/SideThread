@@ -73,15 +73,17 @@ export const ChatArea: React.FC = () => {
     if (!inputText.trim() || isWaitingForResponse) return;
 
     const userQuery = inputText.trim();
+    console.log('SideThread ChatArea: Initiating message submission...', {
+      threadId: thread.id,
+      userQuery,
+    });
     setInputText('');
 
     // 1. Add user message locally
     await addMessage(thread.id, 'user', userQuery);
 
-    // 2. Format injection prompt using the template (passing current threadMessages including this new user message)
+    // 2. Format injection prompt using the template
     const currentMsgs = threadMessages[thread.id] || [];
-    // We already added the user message, so we format history excluding the last message (which is the current query) or we let it be formatted.
-    // Wait, the template has {history} and {message}. {history} should contain everything BEFORE this query.
     const historyText = formatHistory(currentMsgs);
     let prompt = settings.promptTemplate
       .replace('{threadId}', thread.id)
@@ -89,14 +91,18 @@ export const ChatArea: React.FC = () => {
       .replace('{history}', historyText)
       .replace('{message}', userQuery);
 
+    console.log('SideThread ChatArea: Constructed prompt for injection:', prompt);
+
     // 3. Mark state as waiting for reply
     setWaitingForResponse(true, thread.id);
 
     // 4. Inject prompt and submit in ChatGPT main page
     try {
+      console.log('SideThread ChatArea: Submitting prompt to host editor...');
       submitPromptToChatGPT(prompt);
+      console.log('SideThread ChatArea: Prompt submission triggered.');
     } catch (err) {
-      console.error('Failed to submit prompt to ChatGPT:', err);
+      console.error('SideThread ChatArea: Failed to submit prompt to ChatGPT:', err);
       setWaitingForResponse(false, null);
       alert('Could not submit prompt. Please make sure ChatGPT is loaded and responsive.');
     }

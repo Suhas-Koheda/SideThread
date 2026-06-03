@@ -35,6 +35,31 @@ chrome.commands.onCommand.addListener((command) => {
   }
 });
 
+import { ThreadDB } from '../services/db';
+
+// Handle DB requests proxied from content scripts (origins like chatgpt.com)
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'DB_REQUEST') {
+    const { method, args } = message;
+    
+    const dbMethod = (ThreadDB as any)[method];
+    if (typeof dbMethod === 'function') {
+      dbMethod.apply(ThreadDB, args)
+        .then((result: any) => {
+          sendResponse({ success: true, result });
+        })
+        .catch((error: any) => {
+          console.error(`SideThread Background DB: Method '${method}' failed:`, error);
+          sendResponse({ success: false, error: String(error) });
+        });
+    } else {
+      console.error(`SideThread Background DB: Method '${method}' not found.`);
+      sendResponse({ success: false, error: `Method '${method}' not found on ThreadDB` });
+    }
+    return true; // Keep message channel open for async response
+  }
+});
+
 // Configure side panel behavior if the sidePanel API is used
 if (typeof (chrome as any).sidePanel?.setPanelBehavior === 'function') {
   chrome.runtime.onInstalled.addListener(() => {

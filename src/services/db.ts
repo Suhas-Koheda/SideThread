@@ -6,35 +6,66 @@ const THREADS_STORE = 'threads';
 const MESSAGES_STORE = 'messages';
 const PREFS_STORE = 'preferences';
 
+const isContentScript = typeof window !== 'undefined' && window.location.protocol !== 'chrome-extension:';
+
 export class ThreadDB {
   private static db: IDBDatabase | null = null;
+
+  private static sendDbRequest(method: string, ...args: any[]): Promise<any> {
+    return new Promise((resolve, reject) => {
+      if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) {
+        reject(new Error('Chrome extension runtime not available'));
+        return;
+      }
+      
+      console.log(`SideThread DB Proxy: Sending DB_REQUEST for '${method}'`);
+      chrome.runtime.sendMessage({
+        type: 'DB_REQUEST',
+        method,
+        args
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.error(`SideThread DB Proxy error on '${method}':`, chrome.runtime.lastError);
+          reject(chrome.runtime.lastError);
+        } else if (response && response.success) {
+          resolve(response.result);
+        } else {
+          console.error(`SideThread DB Proxy failed on '${method}':`, response?.error);
+          reject(new Error(response?.error || 'Unknown DB proxy error'));
+        }
+      });
+    });
+  }
 
   static init(): Promise<IDBDatabase> {
     if (this.db) return Promise.resolve(this.db);
 
+    console.log('SideThread DB: Initializing IndexedDB directly...');
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
 
       request.onerror = () => {
-        console.error('IndexedDB open failed:', request.error);
+        console.error('SideThread DB: IndexedDB open failed:', request.error);
         reject(request.error);
       };
 
       request.onsuccess = () => {
         this.db = request.result;
+        console.log('SideThread DB: IndexedDB opened successfully.');
         resolve(request.result);
       };
 
       request.onupgradeneeded = (event) => {
         const db = request.result;
+        console.log('SideThread DB: Upgrading database to version', DB_VERSION);
         
         // Create Threads Store
         if (!db.objectStoreNames.contains(THREADS_STORE)) {
           const threadStore = db.createObjectStore(THREADS_STORE, { keyPath: 'id' });
           threadStore.createIndex('chatId', 'chatId', { unique: false });
           threadStore.createIndex('parentId', 'parentId', { unique: false });
+          console.log('SideThread DB: Created threads object store.');
         } else {
-          // If upgrading from v1, make sure indexes exist
           const transaction = (event.target as IDBOpenDBRequest).transaction;
           if (transaction) {
             const threadStore = transaction.objectStore(THREADS_STORE);
@@ -51,11 +82,13 @@ export class ThreadDB {
         if (!db.objectStoreNames.contains(MESSAGES_STORE)) {
           const messageStore = db.createObjectStore(MESSAGES_STORE, { keyPath: 'id' });
           messageStore.createIndex('threadId', 'threadId', { unique: false });
+          console.log('SideThread DB: Created messages object store.');
         }
 
         // Create Preferences Store
         if (!db.objectStoreNames.contains(PREFS_STORE)) {
           db.createObjectStore(PREFS_STORE);
+          console.log('SideThread DB: Created preferences object store.');
         }
       };
     });
@@ -63,6 +96,11 @@ export class ThreadDB {
 
   // Threads Operations
   static async getAllThreads(): Promise<Thread[]> {
+    if (isContentScript) {
+      return this.sendDbRequest('getAllThreads');
+    }
+
+    console.log('SideThread DB: Fetching all threads from IndexedDB');
     const db = await this.init();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(THREADS_STORE, 'readonly');
@@ -71,7 +109,6 @@ export class ThreadDB {
 
       request.onsuccess = () => {
         const threads = request.result as Thread[];
-        // Sort by updatedAt descending
         threads.sort((a, b) => b.updatedAt - a.updatedAt);
         resolve(threads);
       };
@@ -83,6 +120,11 @@ export class ThreadDB {
   }
 
   static async getThread(id: string): Promise<Thread | undefined> {
+    if (isContentScript) {
+      return this.sendDbRequest('getThread', id);
+    }
+
+    console.log(`SideThread DB: Fetching thread ${id} from IndexedDB`);
     const db = await this.init();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(THREADS_STORE, 'readonly');
@@ -100,6 +142,11 @@ export class ThreadDB {
   }
 
   static async saveThread(thread: Thread): Promise<void> {
+    if (isContentScript) {
+      return this.sendDbRequest('saveThread', thread);
+    }
+
+    console.log(`SideThread DB: Saving thread ${thread.id} to IndexedDB`);
     const db = await this.init();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(THREADS_STORE, 'readwrite');
@@ -117,9 +164,13 @@ export class ThreadDB {
   }
 
   static async deleteThread(id: string): Promise<void> {
+    if (isContentScript) {
+      return this.sendDbRequest('deleteThread', id);
+    }
+
+    console.log(`SideThread DB: Deleting thread ${id} from IndexedDB`);
     const db = await this.init();
     
-    // Delete thread
     await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(THREADS_STORE, 'readwrite');
       const store = transaction.objectStore(THREADS_STORE);
@@ -128,12 +179,10 @@ export class ThreadDB {
       request.onerror = () => reject(request.error);
     });
 
-    // Also delete all related messages
     const messages = await this.getMessages(id);
     const deletePromises = messages.map(msg => this.deleteMessage(msg.id));
     await Promise.all(deletePromises);
 
-    // Also update any child threads to disconnect them (or delete them)
     const allThreads = await this.getAllThreads();
     const children = allThreads.filter(t => t.parentId === id);
     for (const child of children) {
@@ -147,6 +196,11 @@ export class ThreadDB {
 
   // Messages Operations
   static async getMessages(threadId: string): Promise<ThreadMessage[]> {
+    if (isContentScript) {
+      return this.sendDbRequest('getMessages', threadId);
+    }
+
+    console.log(`SideThread DB: Fetching messages for thread ${threadId} from IndexedDB`);
     const db = await this.init();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(MESSAGES_STORE, 'readonly');
@@ -156,7 +210,6 @@ export class ThreadDB {
 
       request.onsuccess = () => {
         const msgs = request.result as ThreadMessage[];
-        // Sort by timestamp ascending
         msgs.sort((a, b) => a.timestamp - b.timestamp);
         resolve(msgs);
       };
@@ -168,6 +221,11 @@ export class ThreadDB {
   }
 
   static async saveMessage(message: ThreadMessage): Promise<void> {
+    if (isContentScript) {
+      return this.sendDbRequest('saveMessage', message);
+    }
+
+    console.log(`SideThread DB: Saving message ${message.id} to IndexedDB`);
     const db = await this.init();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(MESSAGES_STORE, 'readwrite');
@@ -185,6 +243,11 @@ export class ThreadDB {
   }
 
   static async deleteMessage(id: string): Promise<void> {
+    if (isContentScript) {
+      return this.sendDbRequest('deleteMessage', id);
+    }
+
+    console.log(`SideThread DB: Deleting message ${id} from IndexedDB`);
     const db = await this.init();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(MESSAGES_STORE, 'readwrite');
@@ -203,6 +266,11 @@ export class ThreadDB {
 
   // Preferences Operations
   static async getPreference<K extends keyof AppPreferences>(key: K): Promise<AppPreferences[K] | undefined> {
+    if (isContentScript) {
+      return this.sendDbRequest('getPreference', key);
+    }
+
+    console.log(`SideThread DB: Fetching preference '${key}'`);
     const db = await this.init();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(PREFS_STORE, 'readonly');
@@ -220,6 +288,11 @@ export class ThreadDB {
   }
 
   static async savePreference<K extends keyof AppPreferences>(key: K, value: AppPreferences[K]): Promise<void> {
+    if (isContentScript) {
+      return this.sendDbRequest('savePreference', key, value);
+    }
+
+    console.log(`SideThread DB: Saving preference '${key}'`);
     const db = await this.init();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(PREFS_STORE, 'readwrite');

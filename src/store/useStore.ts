@@ -142,14 +142,16 @@ export const useStore = create<AppState>((set, get) => ({
 
   createThread: async (chatId, messageId, paragraphHash, selectedText, parentId = null) => {
     const threadId = `thread_${paragraphHash}`;
+    console.log('SideThread Store: createThread starting:', { chatId, threadId, messageId, selectedTextLen: selectedText.length });
     
     // Check if it already exists
     const existing = get().threads.find((t) => t.id === threadId);
     if (existing) {
-      // If we are nested and parent changes (which shouldn't happen usually)
+      console.log('SideThread Store: Thread already exists. Activating thread:', threadId);
       if (parentId && existing.parentId !== parentId) {
         const updated = { ...existing, parentId, updatedAt: Date.now() };
-        await ThreadDB.saveThread(updated);
+        // Save in background
+        ThreadDB.saveThread(updated).catch(e => console.error('SideThread DB: Failed to save parent update:', e));
         set((state) => ({
           threads: state.threads.map((t) => (t.id === threadId ? updated : t)),
         }));
@@ -176,8 +178,10 @@ export const useStore = create<AppState>((set, get) => ({
       updatedAt: Date.now(),
     };
 
-    // Save to IndexedDB
-    await ThreadDB.saveThread(newThread);
+    console.log('SideThread Store: Creating new thread and updating state synchronously:', newThread);
+
+    // Save to IndexedDB in background
+    ThreadDB.saveThread(newThread).catch(e => console.error('SideThread DB: Failed to save new thread:', e));
 
     set((state) => ({
       threads: [newThread, ...state.threads],
@@ -207,8 +211,12 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   addMessage: async (threadId, role, content) => {
+    console.log('SideThread Store: addMessage starting:', { threadId, role, contentLen: content.length });
     const thread = get().threads.find((t) => t.id === threadId);
-    if (!thread) return;
+    if (!thread) {
+      console.warn('SideThread Store: addMessage failed, thread not found:', threadId);
+      return;
+    }
 
     const newMessage: ThreadMessage = {
       id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -223,9 +231,9 @@ export const useStore = create<AppState>((set, get) => ({
       updatedAt: Date.now(),
     };
 
-    await ThreadDB.saveThread(updatedThread);
-    await ThreadDB.saveMessage(newMessage);
+    console.log('SideThread Store: Updating state synchronously for message:', newMessage.id);
 
+    // 1. Update state synchronously first
     set((state) => {
       const currentMsgs = state.threadMessages[threadId] || [];
       return {
@@ -237,15 +245,24 @@ export const useStore = create<AppState>((set, get) => ({
       };
     });
 
-    // Broadcast change to synchronize other extension contexts
+    // 2. Perform DB operations in background
+    ThreadDB.saveThread(updatedThread).catch(e => console.error('SideThread DB: Failed to save thread on addMessage:', e));
+    ThreadDB.saveMessage(newMessage).catch(e => console.error('SideThread DB: Failed to save message on addMessage:', e));
+
+    // 3. Broadcast change to synchronize other extension contexts
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      console.log('SideThread Store: Broadcasting THREADS_MUTATED for new message');
       chrome.runtime.sendMessage({ type: 'THREADS_MUTATED' }).catch(() => {});
     }
   },
 
   updateLastMessage: (threadId, content) => {
+    console.log(`SideThread Store: updateLastMessage called (thread: ${threadId}, len: ${content.length})`);
     const thread = get().threads.find((t) => t.id === threadId);
-    if (!thread) return;
+    if (!thread) {
+      console.warn('SideThread Store: updateLastMessage failed, thread not found:', threadId);
+      return;
+    }
 
     const currentMsgs = [...(get().threadMessages[threadId] || [])];
     const lastMsg = currentMsgs[currentMsgs.length - 1];
@@ -257,7 +274,7 @@ export const useStore = create<AppState>((set, get) => ({
 
     // Save to database asynchronously in the background
     ThreadDB.saveThread(updatedThread).catch(err => {
-      console.error('Failed to save thread update:', err);
+      console.error('Failed to save thread update in updateLastMessage:', err);
     });
 
     if (lastMsg && lastMsg.role === 'assistant') {
@@ -268,7 +285,7 @@ export const useStore = create<AppState>((set, get) => ({
       };
       
       ThreadDB.saveMessage(updatedMsg).catch(err => {
-        console.error('Failed to save message update:', err);
+        console.error('Failed to save message update in updateLastMessage:', err);
       });
       
       currentMsgs[currentMsgs.length - 1] = updatedMsg;
@@ -289,7 +306,7 @@ export const useStore = create<AppState>((set, get) => ({
       };
       
       ThreadDB.saveMessage(newMessage).catch(err => {
-        console.error('Failed to save new message:', err);
+        console.error('Failed to save new message in updateLastMessage:', err);
       });
       
       set((state) => ({
@@ -327,7 +344,15 @@ export const useStore = create<AppState>((set, get) => ({
 
 // Listen for cross-context synchronization messages (e.g. from Content Script to Side Panel)
 if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+  console.log('SideThread Store: Registered runtime message listener for synchronization.');
   chrome.runtime.onMessage.addListener((message) => {
+    // Avoid spamming full logs for streaming, but log the message type
+    if (message.type === 'STREAMING_UPDATE') {
+      console.log(`SideThread Store Sync: Received STREAMING_UPDATE for thread ${message.threadId} (isWaiting: ${message.isWaiting}, len: ${message.content.length})`);
+    } else {
+      console.log('SideThread Store Sync: Received runtime message:', message);
+    }
+    
     const store = useStore.getState();
     
     if (message.type === 'STREAMING_UPDATE') {
@@ -368,6 +393,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
         });
       }
     } else if (message.type === 'THREADS_MUTATED') {
+      console.log('SideThread Store Sync: THREADS_MUTATED received, reloading threads, settings, and messages.');
       // Reload threads and settings
       store.loadThreads();
       store.loadSettings();
